@@ -1,0 +1,36 @@
+*.class
+#package fiel
+*.war
+*.ear
+#kdiff3 ignore
+*.orig
+ 
+#maven ignore
+target/
+ 
+#eclipse ihnore
+.settings
+.project
+.classpatch
+ 
+#idea
+.idea/
+/idea/
+*.ipr
+*.iml
+*.iws
+#temp file
+*.log
+*.cache
+*.diff
+*.patch
+*.tmp
+ 
+#system file
+.DS_Store
+Thumbs.db
+
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class

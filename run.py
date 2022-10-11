@@ -18,6 +18,7 @@ BiDAF model
 
 import argparse
 import json
+import numpy as np
 
 import mindspore
 import mindspore.nn as nn
@@ -27,16 +28,16 @@ import mindspore.dataset as ds
 import mindspore.context as context
 
 from model import BiDAF
-from data import download, load_glove
+from data import load_vocab
 from evaluate import evaluate
-
+from ema import EMA
 
 # mindspore.set_context(mode=context.PYNATIVE_MODE ,max_call_depth=10000)
 # mindspore.set_context(mode=context.GRAPH_MODE ,max_call_depth=10000, enable_graph_kernel=True)
 mindspore.set_context(mode=context.GRAPH_MODE, max_call_depth=10000)
 
 
-def train_loop(model, dataset, loss_fn, optimizer):
+def train_loop(model, dataset, loss_fn, optimizer, ema):
     # Define forward function
     def forward_fn(c_char, q_char, c_word, q_word, c_lens, q_lens, s_idx, e_idx):
         logits = model(c_char, q_char, c_word, q_word, c_lens, q_lens)
@@ -56,6 +57,10 @@ def train_loop(model, dataset, loss_fn, optimizer):
     for batch, (c_char, q_char, c_word, q_word, c_lens, q_lens, s_idx, e_idx, _) \
         in enumerate(dataset.create_tuple_iterator()):
         loss = train_step(c_char, q_char, c_word, q_word, c_lens, q_lens, s_idx, e_idx)
+        for name, param in model.parameters_and_names():
+            if param.requires_grad:
+                ema.update(name, param.data)
+                param.set_data(ema.get(name))
 
         if batch % 100 == 0:
             loss, current = loss.asnumpy(), batch
@@ -86,7 +91,14 @@ def test_loop(model, dataset, vocab, loss_fn):
         for i in range(batch_size):
             answer_id = ids.asnumpy()[i]
             answer = c_word[i][s_idx[i].asnumpy().item():e_idx[i].asnumpy().item()+1]
-            answer = ' '.join([vocab[idx.asnumpy().item()] for idx in answer])
+
+            answer_list = []
+            for idx in answer:
+                idx = idx.asnumpy().item()
+                if idx < 0:
+                    idx = idx + 188744
+                answer_list.append(vocab.ids_to_tokens(idx))
+            answer = ' '.join(answer_list)
             answers[answer_id.item()] = answer
 
     with open(args.dataset_file) as dataset_file:
@@ -107,20 +119,20 @@ parser.add_argument('--hidden_size', default=100, type=int)
 parser.add_argument('--print_freq', default=250, type=int)
 parser.add_argument('--word_dim', default=100, type=int)
 
-parser.add_argument('--train_batch_size', default=4, type=int)
-parser.add_argument('--dev_batch_size', default=4, type=int)
-parser.add_argument('--epoch', default=12, type=int)
+parser.add_argument('--train_batch_size', default=60, type=int)
+parser.add_argument('--dev_batch_size', default=100, type=int)
+parser.add_argument('--epoch', default=6, type=int)
 parser.add_argument('--gpu', default=0, type=int)
-parser.add_argument('--learning_rate', default=0.03, type=float)
+parser.add_argument('--learning_rate', default=0.5, type=float)
 
 parser.add_argument('--train_file', default='train-v1.1.json')
 parser.add_argument('--dev_file', default='dev-v1.1.json')
-parser.add_argument('--dataset_file', default='.data/squad/train-v1.1.json')
+parser.add_argument('--dataset_file', default='.data/dev-v1.1.json')
 args = parser.parse_args()
 
 # load datasets
-glove_path = download('glove.6B.zip', 'https://mindspore-website.obs.myhuaweicloud.com/notebook/datasets/glove.6B.zip')
-word_vocab, embeddings = load_glove(glove_path)
+char_vocab, word_vocab = load_vocab()
+embeddings = np.load(".data/embeddings.npy")
 
 train_file = '.data/train.mindrecord'
 valid_file = '.data/dev.mindrecord'
@@ -136,24 +148,29 @@ squad_train = squad_train.batch(args.train_batch_size)
 squad_valid = squad_valid.batch(args.dev_batch_size)
 
 # define Models & Loss & Optimizer
-char_vocab_size = 1422
+char_vocab_size = len(char_vocab.vocab())
 char_dim = args.char_dim
 char_channel_width = args.char_channel_width
 char_channel_size = args.char_channel_size
-pad_idx = pad_idx = word_vocab.tokens_to_ids('<pad>')
+pad_idx = word_vocab.tokens_to_ids('<pad>')
 hidden_size = args.hidden_size
 dropout = args.dropout
-lr = 0.001
+lr = args.learning_rate
 epoch = args.epoch
 
 net = BiDAF(char_vocab_size, char_dim, char_channel_width, char_channel_size,
             embeddings, pad_idx, hidden_size, dropout)
+
+ema = EMA(args.exp_decay_rate)
+for name, param in net.parameters_and_names():
+    if param.requires_grad:
+        ema.register(name, param.data)
 
 loss = nn.CrossEntropyLoss()
 optimizer = nn.Adadelta(net.trainable_params(), learning_rate=lr)
 
 for t in range(epoch):
     print(f"Epoch {t+1}\n-------------------------------")
-    train_loop(net, squad_train, loss, optimizer)
+    train_loop(net, squad_train, loss, optimizer, ema)
     test_loop(net, squad_valid, word_vocab, loss)
 print("Done!")

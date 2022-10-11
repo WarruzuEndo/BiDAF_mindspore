@@ -1,77 +1,9 @@
-import os
-import shutil
-import tempfile
-import zipfile
 import json
-from typing import IO
-from pathlib import Path
 import nltk
-import requests
 import numpy as np
-from tqdm import tqdm
 
 import mindspore.dataset as ds
 from mindspore.mindrecord import FileWriter
-
-
-cache_dir = Path.home() / '.mindspore_examples'
-
-
-def http_get(url: str, temp_file: IO):
-    """
-    Use requests to download dataset
-    """
-    req = requests.get(url, stream=True)
-    content_length = req.headers.get('Content-Length')
-    total = int(content_length) if content_length is not None else None
-    progress = tqdm(unit='B', total=total)
-    for chunk in req.iter_content(chunk_size=1024):
-        if chunk:
-            progress.update(len(chunk))
-            temp_file.write(chunk)
-    progress.close()
-
-
-def download(file_name: str, url: str):
-    """
-    Download dataset
-    """
-    if not os.path.exists(cache_dir):
-        os.makedirs(cache_dir)
-    cache_path = os.path.join(cache_dir, file_name)
-    cache_exist = os.path.exists(cache_path)
-    if not cache_exist:
-        with tempfile.NamedTemporaryFile() as temp_file:
-            http_get(url, temp_file)
-            temp_file.flush()
-            temp_file.seek(0)
-            with open(cache_path, 'wb') as cache_file:
-                shutil.copyfileobj(temp_file, cache_file)
-    return cache_path
-
-
-def load_glove(embed_path):
-    """
-    load glove
-    """
-    glove_100d_path = os.path.join(cache_dir, 'glove.6B.100d.txt')
-    if not os.path.exists(glove_100d_path):
-        glove_zip = zipfile.ZipFile(embed_path)
-        glove_zip.extractall(cache_dir)
-
-    glove_embeddings = []
-    tokens = []
-    with open(glove_100d_path, encoding='utf-8') as gf:
-        for glove in gf:
-            word, embedding = glove.split(maxsplit=1)
-            tokens.append(word)
-            glove_embeddings.append(np.fromstring(embedding, dtype=np.float32, sep=' '))
-    glove_embeddings.append(np.random.rand(100))
-    glove_embeddings.append(np.zeros((100,), np.float32))
-
-    glove_vocab = ds.text.Vocab.from_list(tokens, special_tokens=["<unk>", "<pad>"], special_first=False)
-    glove_embeddings = np.array(glove_embeddings).astype(np.float32)
-    return glove_vocab, glove_embeddings
 
 
 def word_tokenize(tokens):
@@ -185,8 +117,8 @@ class Iterator():
             ids = data["id"]
             s_idx = data["s_idx"]
             e_idx = data["e_idx"]
-            context = data["context"]
-            question = data["question"]
+            context = data["context"].lower()
+            question = data["question"].lower()
 
             c_word = word_tokenize(context)
             q_word = word_tokenize(question)
@@ -241,53 +173,26 @@ def download_dataset():
     return SQuAD(train_path), SQuAD(valid_path)
 
 
-def build_char_vocab(train_dataset, valid_dataset):
-    print("building vocab...")
-    chars = []
-    for item in train_dataset:
-        context_word = word_tokenize(item["context"])
-        question_word = word_tokenize(item["question"])
-        for word in context_word:
-            char = list(word)
-            for c in char:
-                chars.append(c)
-        for word in question_word:
-            char = list(word)
-            for c in char:
-                chars.append(c)
+def load_vocab():
+    with open('.data/char_vocab.json', mode='r', encoding='utf-8') as json_file:
+        char_dict = json.load(json_file)
 
-    for item in valid_dataset:
-        context_word = word_tokenize(item["context"])
-        question_word = word_tokenize(item["question"])
-        for word in context_word:
-            char = list(word)
-            for c in char:
-                chars.append(c)
-        for word in question_word:
-            char = list(word)
-            for c in char:
-                chars.append(c)
+    with open('.data/word_vocab.json', mode='r', encoding='utf-8') as json_file:
+        word_dict = json.load(json_file)
 
-    chars = list({}.fromkeys(chars).keys())
-
-    return ds.text.Vocab.from_list(chars, special_tokens=["<unk>", "<pad>"])
+    return ds.text.Vocab.from_dict(char_dict), ds.text.Vocab.from_dict(word_dict)
 
 
 if __name__ == "__main__":
     # load datasets
-    glove_path = download('glove.6B.zip',
-                          'https://mindspore-website.obs.myhuaweicloud.com/notebook/datasets/glove.6B.zip')
-    word_vocab, embeddings = load_glove(glove_path)
-
     train_dataset, valid_dataset = download_dataset()
-    char_vocab = build_char_vocab(train_dataset, valid_dataset)
-    char_vocab_size = len(char_vocab.vocab())
+    char_vocab, word_vocab = load_vocab()
 
     print("building iterators...")
     train_iterator = Iterator(train_dataset, word_vocab, char_vocab,
-                            max_c_word_len=768, max_q_word_len=64, max_char_len=48)
+                              max_c_word_len=768, max_q_word_len=64, max_char_len=48)
     valid_iterator = Iterator(valid_dataset, word_vocab, char_vocab,
-                            max_c_word_len=768, max_q_word_len=64, max_char_len=48)
+                              max_c_word_len=768, max_q_word_len=64, max_char_len=48)
 
     nlp_schema = {
         "c_char": {"type": "int32", "shape": [768, 48]},
@@ -332,15 +237,15 @@ if __name__ == "__main__":
         valid_datalist.append(sample)
 
     train_writer = FileWriter(file_name=".data/train.mindrecord",
-                            shard_num=1, overwrite=True)
+                              shard_num=1, overwrite=True)
     train_writer.add_schema(nlp_schema, "preprocessed squad train dataset")
     train_writer.write_raw_data(train_datalist)
     train_writer.commit()
     print("squad train data write success")
 
     valid_writer = FileWriter(file_name=".data/dev.mindrecord",
-                            shard_num=1, overwrite=True)
+                              shard_num=1, overwrite=True)
     valid_writer.add_schema(nlp_schema, "preprocessed squad train dataset")
-    valid_writer.write_raw_data(train_datalist)
+    valid_writer.write_raw_data(valid_datalist)
     valid_writer.commit()
     print("squad dev data write success")
